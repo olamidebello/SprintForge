@@ -1,0 +1,31 @@
+# Managed by SprintForge. Only this application's hostname is routed here.
+server {
+    listen 80;
+{% for address in sprintforge_bind_ipv4 %}
+    listen {{ address }}:80;
+{% endfor %}
+    server_name {{ sprintforge_domain }};
+    client_max_body_size 100k;
+{% if sf_certificate.stat.exists and sprintforge_tls | bool %}
+    return 301 https://{{ sprintforge_domain }}$request_uri;
+}
+server {
+    listen 443 ssl;
+{% for address in sprintforge_bind_ipv4 %}
+    listen {{ address }}:443 ssl;
+{% endfor %}
+    server_name {{ sprintforge_domain }};
+    ssl_certificate /etc/letsencrypt/live/{{ sprintforge_domain }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ sprintforge_domain }}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 100k;
+{% endif %}
+    location / {
+        proxy_pass http://127.0.0.1:{{ sprintforge_port }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;
+    }
+}

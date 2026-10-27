@@ -64,7 +64,7 @@ ansible-playbook -i localhost, -c local deploy/deploy.yml \
   -e sprintforge_email=YOUR_CERTIFICATE_EMAIL
 ```
 
-This installs a dedicated systemd service on loopback port 18870, a domain-specific Nginx virtual host, and a Let's Encrypt certificate. It does not overwrite an existing SprintForge Nginx file so Certbot TLS configuration survives updates; review that file manually when changing the domain or port. Nginx configuration is validated before reload. No unrelated site configuration is removed. Git refuses dirty checkout overwrites. Review your host's existing routing before running it. DNS, certificates and deployment have not been tested against your server by this repository creation.
+This installs a dedicated systemd service on loopback port 18870, a domain-specific Nginx virtual host, and a Let's Encrypt certificate. It manages only the SprintForge virtual host, binds its exact hostname on wildcard, loopback and primary IPv4 listeners, and preserves HTTPS through a certificate-aware template. It saves and restores the previous route if Nginx validation or local identity checks fail. Nginx configuration is validated before reload. No unrelated site configuration is removed. Git refuses dirty checkout overwrites. Review your host's existing routing before running it. DNS, certificates and deployment have not been tested against your server by this repository creation.
 
 Use the same playbook for subsequent source updates. Pin `sprintforge_ref` to a reviewed commit or release for controlled deployments. Certbot's system package supplies renewal scheduling; verify the host's renewal timer after installation. Create your super admin using the CLI above.
 
@@ -123,3 +123,7 @@ sudo bash /tmp/sprintforge-deploy.sh YOUR_CERTIFICATE_EMAIL
 ```
 
 Repeat the same commands to pull and deploy subsequent updates. The script stops on errors; it does not force-overwrite dirty application checkouts. It checks the application, Nginx routing, and public HTTPS. Existing deployments get a pre-update backup, but this is not an automatic rollback mechanism. If a deployment fails, use the reported task and service logs to diagnose it before retrying.
+
+### Repair: domain serves Postmaster or another application
+
+Update and rerun `scripts/deploy.sh` using the command above. The playbook now explicitly binds SprintForge on loopback and the primary server IPv4 address, because an IP-specific Nginx listener can take precedence over a wildcard listener before hostname selection. This addresses that routing scenario without changing Postmaster's virtual host. It also rejects duplicate exact SprintForge names, verifies the enabled route is actually loaded, checks application identity on both local addresses and checks public routing before certificate issuance. A missing Nginx include or conflicting exact hostname stops deployment and saves private diagnostics at `/var/log/sprintforge-nginx-diagnostic.log`; it does not automatically rewrite unrelated configuration. Confirm or correct DNS if the public routing check still fails.

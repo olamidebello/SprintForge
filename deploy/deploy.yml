@@ -103,38 +103,9 @@
         enabled: true
         state: started
         daemon_reload: true
-    - name: Install dedicated domain routing
-      ansible.builtin.copy:
-        dest: /etc/nginx/sites-available/sprintforge
-        mode: '0644'
-        force: false
-        content: |
-          server {
-              listen 80;
-              server_name {{ sprintforge_domain }};
-              client_max_body_size 100k;
-              location / {
-                  proxy_pass http://127.0.0.1:{{ sprintforge_port }};
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Forwarded-Proto $scheme;
-                  proxy_set_header X-Real-IP $remote_addr;
-                  proxy_connect_timeout 5s;
-                  proxy_read_timeout 30s;
-              }
-          }
-      notify: Reload Nginx
-    - name: Enable SprintForge virtual host
-      ansible.builtin.file:
-        src: /etc/nginx/sites-available/sprintforge
-        dest: /etc/nginx/sites-enabled/sprintforge
-        state: link
-      notify: Reload Nginx
-    - name: Validate Nginx routing
-      ansible.builtin.command: nginx -t
-      changed_when: false
-    - name: Apply changed services before health checks
+    - name: Verify application health before changing routing
       ansible.builtin.meta: flush_handlers
-    - name: Verify application health
+    - name: Confirm application backend
       ansible.builtin.uri:
         url: http://127.0.0.1:{{ sprintforge_port }}/api/health
         status_code: 200
@@ -142,16 +113,108 @@
       retries: 5
       delay: 2
       until: sf_health.status == 200
-    - name: Verify local domain routing through Nginx
+    - name: Select loopback and primary IPv4 listeners
+      ansible.builtin.set_fact:
+        sprintforge_bind_ipv4: "{{ (['127.0.0.1'] + [ansible_default_ipv4.address | default('127.0.0.1')]) | unique | list }}"
+    - name: Detect existing certificate
+      ansible.builtin.stat:
+        path: /etc/letsencrypt/live/{{ sprintforge_domain }}/fullchain.pem
+      register: sf_certificate
+    - name: Inspect previous SprintForge routing
+      ansible.builtin.stat:
+        path: /etc/nginx/sites-available/sprintforge
+      register: sf_previous_route
+    - name: Save previous application route for rollback
+      ansible.builtin.slurp:
+        src: /etc/nginx/sites-available/sprintforge
+      register: sf_old_route
+      when: sf_previous_route.stat.exists
+    - name: Inspect previous enabled route
+      ansible.builtin.stat:
+        path: /etc/nginx/sites-enabled/sprintforge
+        follow: false
+      register: sf_previous_enabled
+    - name: Install and verify dedicated SprintForge routing
+      block:
+        - name: Render exact-name route on loopback and primary server IP
+          ansible.builtin.template:
+            src: templates/sprintforge.conf.j2
+            dest: /etc/nginx/sites-available/sprintforge
+            mode: '0644'
+            backup: true
+        - name: Enable dedicated route
+          ansible.builtin.file:
+            src: /etc/nginx/sites-available/sprintforge
+            dest: /etc/nginx/sites-enabled/sprintforge
+            state: link
+        - name: Validate Nginx and reject duplicate SprintForge names
+          ansible.builtin.command: nginx -T
+          register: sf_nginx_configuration
+          changed_when: false
+          failed_when: >-
+            sf_nginx_configuration.rc != 0 or
+            ('conflicting server name "' ~ sprintforge_domain ~ '"') in sf_nginx_configuration.stderr or
+            '# configuration file /etc/nginx/sites-enabled/sprintforge:' not in sf_nginx_configuration.stdout
+          no_log: true
+        - name: Activate validated route
+          ansible.builtin.systemd:
+            name: nginx
+            state: reloaded
+        - name: Verify SprintForge identity on each local listener
+          ansible.builtin.uri:
+            url: 'http://{{ item }}/'
+            headers:
+              Host: '{{ sprintforge_domain }}'
+            follow_redirects: none
+            status_code: [200, 301, 302, 308]
+            return_content: true
+          loop: '{{ sprintforge_bind_ipv4 }}'
+          register: sf_route_probe
+          failed_when: >-
+            (sf_route_probe.status == 200 and '<title>SprintForge' not in sf_route_probe.content) or
+            (sf_route_probe.status != 200 and not (sf_route_probe.location | default('')).startswith('https://' ~ sprintforge_domain ~ '/'))
+      rescue:
+        - name: Retain private routing diagnostics
+          ansible.builtin.copy:
+            dest: /var/log/sprintforge-nginx-diagnostic.log
+            content: '{{ sf_nginx_configuration.stdout | default("") }}
+{{ sf_nginx_configuration.stderr | default("") }}'
+            mode: '0600'
+        - name: Restore previous SprintForge route
+          ansible.builtin.copy:
+            dest: /etc/nginx/sites-available/sprintforge
+            content: '{{ sf_old_route.content | b64decode }}'
+            mode: '0644'
+          when: sf_previous_route.stat.exists
+        - name: Remove newly created failed route link
+          ansible.builtin.file:
+            path: /etc/nginx/sites-enabled/sprintforge
+            state: absent
+          when: not sf_previous_enabled.stat.exists
+        - name: Remove newly created failed route file
+          ansible.builtin.file:
+            path: /etc/nginx/sites-available/sprintforge
+            state: absent
+          when: not sf_previous_route.stat.exists
+        - name: Validate restored Nginx configuration
+          ansible.builtin.command: nginx -t
+          changed_when: false
+        - name: Activate restored routing
+          ansible.builtin.systemd:
+            name: nginx
+            state: reloaded
+        - name: Stop after restoring the previous application routing
+          ansible.builtin.fail:
+            msg: 'SprintForge routing failed and its prior route was restored. Inspect /var/log/sprintforge-nginx-diagnostic.log privately for duplicate names or a missing sites-enabled include. Other site files were not changed.'
+    - name: Verify public HTTP routing before requesting a certificate
       ansible.builtin.uri:
-        url: http://127.0.0.1/
-        headers:
-          Host: '{{ sprintforge_domain }}'
+        url: http://{{ sprintforge_domain }}/
         follow_redirects: none
-        status_code: [200, 301, 302, 308]
+        status_code: 200
         return_content: true
-      register: sf_routing
-      failed_when: sf_routing.status == 200 and 'SprintForge' not in sf_routing.content
+      register: sf_public_http
+      failed_when: "'<title>SprintForge' not in sf_public_http.content"
+      when: sprintforge_tls | bool and not sf_certificate.stat.exists
     - name: Provision TLS certificate and redirect HTTP
       ansible.builtin.command:
         argv:
@@ -166,6 +229,15 @@
           - '{{ sprintforge_domain }}'
         creates: /etc/letsencrypt/live/{{ sprintforge_domain }}/fullchain.pem
       when: sprintforge_tls
+    - name: Verify SprintForge identity over public HTTPS
+      ansible.builtin.uri:
+        url: https://{{ sprintforge_domain }}/
+        status_code: 200
+        return_content: true
+        validate_certs: true
+      register: sf_public_identity
+      failed_when: "'<title>SprintForge' not in sf_public_identity.content"
+      when: sprintforge_tls | bool
     - name: Verify public TLS routing from the server
       ansible.builtin.uri:
         url: https://{{ sprintforge_domain }}/api/health
