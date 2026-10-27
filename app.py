@@ -347,11 +347,11 @@ class Handler(BaseHTTPRequestHandler):
         if ticket is None:
             require(not any(r['kind']=='ticket' and r.get('project')==project and r.get('type')=='Bug' and r['status']!='Done' for r in records),'Quality gate: close open defects before release',409)
     def static(self,path):
-        paths={'/':'index.html','/app':'index.html','/terms':'terms.html','/privacy':'privacy.html','/copyright':'copyright.html'}
+        paths={'/':'index.html','/app':'index.html','/terms':'terms.html','/privacy':'privacy.html','/copyright':'copyright.html','/install':'install.html','/sw.js':'sw.js','/manifest.webmanifest':'manifest.webmanifest'}
         rel=paths.get(path,path.removeprefix('/static/') if path.startswith('/static/') else '')
         file=(ROOT/'static'/rel).resolve()
         require(rel and file.is_relative_to((ROOT/'static').resolve()) and file.is_file(),'Not found',404)
-        types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml'}
+        types={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.png':'image/png','.webp':'image/webp','.svg':'image/svg+xml','.webmanifest':'application/manifest+json'}
         payload=file.read_bytes(); self.send_response(200); self.send_header('Content-Type',types.get(file.suffix,'application/octet-stream')); self.send_header('Content-Length',str(len(payload))); self.security(); self.end_headers(); self.wfile.write(payload)
 
 if __name__=='__main__':

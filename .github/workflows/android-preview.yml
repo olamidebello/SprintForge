@@ -1,0 +1,35 @@
+name: Android development preview
+on:
+  push:
+    paths: ['mobile/android/**', '.github/workflows/android-preview.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: android-preview
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install exact SDK packages using the runner SDK
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"'
+      - name: Build and verify signed development preview
+        run: python3 mobile/android/build.py --sdk "$ANDROID_HOME" --signing "$RUNNER_TEMP/sprintforge-signing" --output "$RUNNER_TEMP/sprintforge-output"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sprintforge-android-preview
+          path: ${{ runner.temp }}/sprintforge-output/*
+      - name: Publish preview APK and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view android-preview >/dev/null 2>&1; then
+            gh release create android-preview --target "$GITHUB_SHA" --prerelease --title "SprintForge Android development preview" --notes "Android 8+ website client. Internet required. Development signing, no Play Store release. Preview upgrades may require reinstalling. See /install on SprintForge for limitations."
+          fi
+          gh release upload android-preview "$RUNNER_TEMP"/sprintforge-output/* --clobber

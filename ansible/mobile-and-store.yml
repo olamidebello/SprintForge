@@ -1,0 +1,32 @@
+---
+- import_playbook: rebuild-and-repair.yml
+- name: Update African Apps Store catalog with SprintForge
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Pull current African Apps Store publishing tools
+      ansible.builtin.git:
+        repo: https://github.com/olamidebello/africanappsstore.git
+        dest: /opt/sprintforge-store-publish
+        version: main
+        force: false
+    - name: Publish only the SprintForge listing to the existing store database
+      ansible.builtin.command:
+        argv: [python3, /opt/sprintforge-store-publish/tools/install_sprintforge.py, --discover]
+      register: sf_store_result
+      changed_when: true
+    - name: Verify SprintForge mobile install page
+      ansible.builtin.uri:
+        url: https://sprintforge.netwizzard.tech/install
+        status_code: 200
+        return_content: true
+      register: sf_install
+      failed_when: "'Download Android preview APK' not in sf_install.content"
+    - name: Verify public store listing
+      ansible.builtin.uri:
+        url: https://africanappsstore.space/api/hosted-apps
+        status_code: 200
+        return_content: true
+      register: sf_catalog
+      failed_when: "'sprintforge.netwizzard.tech' not in sf_catalog.content"
