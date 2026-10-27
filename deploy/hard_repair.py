@@ -1,4 +1,5 @@
 """One-shot SprintForge repair, invoked locally by Ansible as root."""
+import time
 import argparse, datetime, hashlib, ipaddress, json, os, re, shutil, socket, subprocess, sys, urllib.request
 from pathlib import Path
 
@@ -62,11 +63,22 @@ class Repair:
             body=r.read(200000).decode('utf-8','replace')
             if marker and marker not in body:raise RuntimeError('Wrong application at '+url)
             return body
-    def probe(self,ip,port,tls=False,path='/'):
-        args=['curl','--fail','--silent','--show-error','--max-time','20','--noproxy','*','--resolve',f'{DOMAIN}:{port}:{"["+ip+"]" if ":" in ip else ip}',f'{"https" if tls else "http"}://{DOMAIN}:{port}{path}']
-        body=self.run(args)
+    def probe(self,ip,port,tls=False,path='/',attempts=10):
+        header=self.backup/('probe-'+hashlib.sha256((ip+str(port)+path).encode()).hexdigest()[:12]+'.headers')
+        args=['curl','--fail','--silent','--show-error','--connect-timeout','3','--max-time','8','--noproxy','*','--dump-header',str(header),'--resolve',f'{DOMAIN}:{port}:{"["+ip+"]" if ":" in ip else ip}',f'{"https" if tls else "http"}://{DOMAIN}:{port}{path}']
         expected='"status": "ok"' if path=='/api/health' else '<title>SprintForge'
-        if expected not in body:raise RuntimeError('Wrong application on listener '+ip+':'+str(port))
+        detail='no response'
+        for attempt in range(attempts):
+            try:
+                body=self.run(args)
+                headers=header.read_text() if header.exists() else ''
+                route='x-sprintforge-route: managed-v2' in headers.lower()
+                if expected in body and route:return
+                title=re.search(r'<title[^>]*>(.*?)</title>',body,re.I|re.S)
+                detail='title='+repr(title.group(1)[:120] if title else '(none)')+'; managed route marker='+str(route)
+            except RuntimeError as e:detail=str(e)
+            if attempt+1<attempts:time.sleep(1)
+        raise RuntimeError('SprintForge routing not ready on '+ip+':'+str(port)+' after '+str(attempts)+' checks; '+detail)
     def config(self,addresses,tls=False):
         def listens(port):
             out=[f'    listen {port}'+(' ssl' if port==443 else '')+';']
@@ -74,7 +86,7 @@ class Repair:
                 value=f'[{ip}]' if ':' in ip else ip
                 out.append(f'    listen {value}:{port}'+(' ssl' if port==443 else '')+';')
             return '\n'.join(out)
-        proxy='''    location / {\n        proxy_pass http://127.0.0.1:18870;\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_read_timeout 30s;\n    }\n'''
+        proxy='''    add_header X-SprintForge-Route managed-v2 always;\n    location / {\n        proxy_pass http://127.0.0.1:18870;\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_read_timeout 30s;\n    }\n'''
         acme='    location ^~ /.well-known/acme-challenge/ { root /var/lib/sprintforge-acme; }\n'
         http='server {\n'+listens(80)+f'\n    server_name {DOMAIN};\n    client_max_body_size 100k;\n'+acme
         if not tls:return '# Managed by SprintForge hard repair\n'+http+proxy+'}\n'
@@ -99,6 +111,8 @@ class Repair:
         self.write('/etc/systemd/system/sprintforge.service','''[Unit]\nDescription=SprintForge\nAfter=network.target\n[Service]\nUser=sprintforge\nGroup=sprintforge\nWorkingDirectory=/opt/sprintforge\nEnvironment=SPRINTFORGE_DB=/var/lib/sprintforge/sprintforge.db\nEnvironment=SPRINTFORGE_SECURE_COOKIE=1\nEnvironment=HOST=127.0.0.1\nEnvironment=PORT=18870\nExecStart=/usr/bin/python3 /opt/sprintforge/app.py\nRestart=on-failure\nRestartSec=3\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\nReadWritePaths=/var/lib/sprintforge\n[Install]\nWantedBy=multi-user.target\n''')
         self.run(['systemctl','daemon-reload']);self.run(['systemctl','enable','--now','sprintforge']);self.run(['systemctl','restart','sprintforge'])
         self.run(['curl','--fail','--silent','--show-error','--retry','5','--retry-connrefused','--retry-delay','1','http://127.0.0.1:18870/api/health'])
+        backend=self.run(['curl','--fail','--silent','--show-error','--noproxy','*','--max-time','10','http://127.0.0.1:18870/'])
+        if '<title>SprintForge' not in backend:raise RuntimeError('Port 18870 does not serve the SprintForge application')
         self.stage='active Nginx routing'
         dump=self.run(['nginx','-T']);(self.backup/'nginx-before.txt').write_text(dump)
         files=re.findall(r'^# configuration file (.+):$',dump,re.M)
@@ -123,6 +137,8 @@ class Repair:
         challenge=Path('/var/lib/sprintforge-acme/.well-known/acme-challenge');challenge.mkdir(parents=True,exist_ok=True)
         self.write(MANAGED,self.config(addresses))
         self.run(['nginx','-t']);self.run(['systemctl','reload','nginx'])
+        (self.backup/'nginx-candidate.txt').write_text(self.run(['nginx','-T']))
+        self.run(['systemctl','show','nginx','-p','MainPID','-p','ExecStart','-p','ExecReload'])
         for ip in addresses:
             if ip!='::':self.probe(ip,80)
         self.stage='public DNS and ACME challenge'
@@ -155,6 +171,8 @@ class Repair:
         try:self.repair();report.update(status='passed',stage='complete',url='https://'+DOMAIN);code=0
         except Exception as e:
             report.update(stage=self.stage,reason=str(e));code=1
+            try:self.run(['ss','-ltnp'])
+            except Exception:pass
             if self.routing:
                 try:self.restore();report['routing_restored']=True
                 except Exception as rollback:report['routing_restore_error']=str(rollback)

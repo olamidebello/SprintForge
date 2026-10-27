@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
+import tempfile
 spec=importlib.util.spec_from_file_location('hard_repair',Path(__file__).resolve().parents[1]/'deploy'/'hard_repair.py')
 r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r)
 
@@ -23,6 +25,25 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(r.inject(fixed),fixed)
         self.assertEqual(fixed.count(str(r.MANAGED)),1)
         with self.assertRaises(RuntimeError):r.inject('events {}')
+    def test_probe_waits_for_reloaded_route(self):
+        repair=object.__new__(r.Repair)
+        with tempfile.TemporaryDirectory() as directory:
+            repair.backup=Path(directory);calls=[]
+            def run(args):
+                calls.append(args)
+                Path(args[args.index('--dump-header')+1]).write_text('X-SprintForge-Route: managed-v2' if len(calls)>1 else '')
+                return '<title>SprintForge' if len(calls)>1 else '<title>Olamidepanel</title>'
+            repair.run=run
+            with patch.object(r.time,'sleep') as sleep:
+                repair.probe('127.0.0.1',80)
+                self.assertEqual(len(calls),2);sleep.assert_called_once()
+    def test_persistent_wrong_route_reports_title(self):
+        repair=object.__new__(r.Repair)
+        with tempfile.TemporaryDirectory() as directory:
+            repair.backup=Path(directory);repair.run=lambda args:'<title>Olamidepanel</title>'
+            with patch.object(r.time,'sleep'):
+                with self.assertRaisesRegex(RuntimeError,'Olamidepanel'):
+                    repair.probe('127.0.0.1',80,attempts=2)
     def test_renders_http_and_tls(self):
         repair=object.__new__(r.Repair)
         for tls in (False,True):
