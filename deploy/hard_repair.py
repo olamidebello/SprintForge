@@ -58,11 +58,22 @@ class Repair:
     def write(self,path,value):
         path=Path(path).resolve();self.save(path);path.write_text(value);os.chmod(path,0o644)
     def request(self,url,marker=None):
-        # DNS and TLS are validated normally; no insecure public fallback.
-        with urllib.request.urlopen(url,timeout=25) as r:
-            body=r.read(200000).decode('utf-8','replace')
-            if marker and marker not in body:raise RuntimeError('Wrong application at '+url)
-            return body
+        # Public checks must use direct DNS/TLS, matching local probes' --noproxy.
+        opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(url,timeout=25) as response:
+                body=response.read(200000).decode('utf-8','replace')
+                if marker and marker not in body:raise RuntimeError('Wrong application at '+url)
+                return body
+        except urllib.error.HTTPError as error:
+            raise RuntimeError('Public check returned HTTP '+str(error.code)+' at '+url) from error
+    @staticmethod
+    def prepare_challenge():
+        root=Path('/var/lib/sprintforge-acme')
+        for path in (root,root/'.well-known',root/'.well-known'/'acme-challenge'):
+            path.mkdir(parents=True,exist_ok=True)
+            path.chmod(0o755)
+        return root/'.well-known'/'acme-challenge'
     def probe(self,ip,port,tls=False,path='/',attempts=10):
         header=self.backup/('probe-'+hashlib.sha256((ip+str(port)+path).encode()).hexdigest()[:12]+'.headers')
         args=['curl','--fail','--silent','--show-error','--connect-timeout','3','--max-time','8','--noproxy','*','--dump-header',str(header),'--resolve',f'{DOMAIN}:{port}:{"["+ip+"]" if ":" in ip else ip}',f'{"https" if tls else "http"}://{DOMAIN}:{port}{path}']
@@ -201,21 +212,26 @@ RestartSec=3
             old=p.read_text();new=remove_name(old)
             if new!=old:self.write(p,new)
         main=Path('/etc/nginx/nginx.conf');self.write(main,inject(main.read_text()))
-        challenge=Path('/var/lib/sprintforge-acme/.well-known/acme-challenge');challenge.mkdir(parents=True,exist_ok=True)
+        challenge=self.prepare_challenge()
         self.write(MANAGED,self.config(addresses))
         self.run(['nginx','-t']);self.run(['systemctl','reload','nginx'])
         (self.backup/'nginx-candidate.txt').write_text(self.run(['nginx','-T']))
         self.run(['systemctl','show','nginx','-p','MainPID','-p','ExecStart','-p','ExecReload'])
         for ip in addresses:
             if ip!='::':self.probe(ip,80)
-        self.stage='public DNS and ACME challenge'
+        self.stage='public HTTP application identity'
         self.request('http://'+DOMAIN+'/', '<title>SprintForge')
-        nonce=os.urandom(16).hex();probe=challenge/nonce;probe.write_text(nonce)
+        self.stage='public ACME challenge readability'
+        nonce=os.urandom(16).hex();probe=challenge/nonce;probe.write_text(nonce);probe.chmod(0o644)
         try:
             if self.request('http://'+DOMAIN+'/.well-known/acme-challenge/'+nonce)!=nonce:raise RuntimeError('Public ACME challenge routed incorrectly')
         finally:probe.unlink(missing_ok=True)
         self.stage='TLS certificate'
-        self.run(['certbot','certonly','--webroot','-w','/var/lib/sprintforge-acme','--non-interactive','--agree-tos','--email',self.email,'-d',DOMAIN,'--keep-until-expiring'])
+        # Certbot inherits a normal public-webroot umask for challenge files.
+        os.umask(0o022)
+        try:
+            self.run(['certbot','certonly','--webroot','-w','/var/lib/sprintforge-acme','--non-interactive','--agree-tos','--email',self.email,'-d',DOMAIN,'--keep-until-expiring'])
+        finally:os.umask(0o077)
         self.write(MANAGED,self.config(addresses,True));self.run(['nginx','-t']);self.run(['systemctl','reload','nginx'])
         self.stage='HTTPS application identity'
         for ip in addresses:

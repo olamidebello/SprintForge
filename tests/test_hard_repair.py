@@ -44,6 +44,19 @@ class RepairTests(unittest.TestCase):
             with patch.object(r.time,'sleep'):
                 with self.assertRaisesRegex(RuntimeError,'Olamidepanel'):
                     repair.probe('127.0.0.1',80,attempts=2)
+    def test_acme_directory_readable_despite_private_umask(self):
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            real_path=Path
+            def path(value):
+                return real_path(directory)/'acme' if value=='/var/lib/sprintforge-acme' else real_path(value)
+            previous=os.umask(0o077)
+            try:
+                with patch.object(r,'Path',side_effect=path):
+                    challenge=r.Repair.prepare_challenge()
+                for folder in [challenge,challenge.parent,challenge.parent.parent]:
+                    self.assertEqual(folder.stat().st_mode & 0o777,0o755)
+            finally:os.umask(previous)
     def test_private_checkout_becomes_service_readable(self):
         import subprocess
         with tempfile.TemporaryDirectory() as directory:
