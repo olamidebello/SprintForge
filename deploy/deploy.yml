@@ -1,0 +1,152 @@
+---
+- name: Deploy SprintForge on a Debian or Ubuntu server
+  hosts: all
+  become: true
+  vars:
+    sprintforge_domain: sprintforge.netwizzard.tech
+    sprintforge_repo: https://github.com/olamidebello/SprintForge.git
+    sprintforge_ref: main
+    sprintforge_port: 18870
+    sprintforge_email: ""
+    sprintforge_tls: true
+  tasks:
+    - name: Validate deployment settings
+      ansible.builtin.assert:
+        that:
+          - sprintforge_domain is match('^[a-z0-9.-]+$')
+          - not sprintforge_tls or sprintforge_email | length > 3
+        fail_msg: Set sprintforge_email for certificate notifications, or explicitly set sprintforge_tls=false for HTTP-only staging.
+    - name: Install system packages
+      ansible.builtin.apt:
+        name: [git, python3, nginx, certbot, python3-certbot-nginx]
+        state: present
+        update_cache: true
+    - name: Create service user
+      ansible.builtin.user:
+        name: sprintforge
+        system: true
+        create_home: false
+        shell: /usr/sbin/nologin
+    - name: Create application directory
+      ansible.builtin.file:
+        path: /opt/sprintforge
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+    - name: Pull application source
+      ansible.builtin.git:
+        repo: '{{ sprintforge_repo }}'
+        dest: /opt/sprintforge
+        version: '{{ sprintforge_ref }}'
+        force: false
+      notify: Restart SprintForge
+    - name: Create private persistent data directory
+      ansible.builtin.file:
+        path: /var/lib/sprintforge
+        state: directory
+        owner: sprintforge
+        group: sprintforge
+        mode: '0700'
+    - name: Install service unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/sprintforge.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=SprintForge SDLC workspace
+          After=network.target
+          [Service]
+          User=sprintforge
+          Group=sprintforge
+          WorkingDirectory=/opt/sprintforge
+          Environment=SPRINTFORGE_DB=/var/lib/sprintforge/sprintforge.db
+          Environment=SPRINTFORGE_SECURE_COOKIE={{ '1' if sprintforge_tls else '0' }}
+          Environment=HOST=127.0.0.1
+          Environment=PORT={{ sprintforge_port }}
+          ExecStart=/usr/bin/python3 /opt/sprintforge/app.py
+          Restart=on-failure
+          RestartSec=3
+          UMask=0077
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ProtectHome=true
+          ReadWritePaths=/var/lib/sprintforge
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart SprintForge
+    - name: Enable and start service
+      ansible.builtin.systemd:
+        name: sprintforge
+        enabled: true
+        state: started
+        daemon_reload: true
+    - name: Install dedicated domain routing
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/sprintforge
+        mode: '0644'
+        force: false
+        content: |
+          server {
+              listen 80;
+              server_name {{ sprintforge_domain }};
+              client_max_body_size 100k;
+              location / {
+                  proxy_pass http://127.0.0.1:{{ sprintforge_port }};
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_connect_timeout 5s;
+                  proxy_read_timeout 30s;
+              }
+          }
+      notify: Reload Nginx
+    - name: Enable SprintForge virtual host
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/sprintforge
+        dest: /etc/nginx/sites-enabled/sprintforge
+        state: link
+      notify: Reload Nginx
+    - name: Validate Nginx routing
+      ansible.builtin.command: nginx -t
+      changed_when: false
+    - name: Apply changed services before health checks
+      ansible.builtin.meta: flush_handlers
+    - name: Verify application health
+      ansible.builtin.uri:
+        url: http://127.0.0.1:{{ sprintforge_port }}/api/health
+        status_code: 200
+      register: sf_health
+      retries: 5
+      delay: 2
+      until: sf_health.status == 200
+    - name: Provision TLS certificate and redirect HTTP
+      ansible.builtin.command:
+        argv:
+          - certbot
+          - --nginx
+          - --non-interactive
+          - --agree-tos
+          - --redirect
+          - --email
+          - '{{ sprintforge_email }}'
+          - -d
+          - '{{ sprintforge_domain }}'
+        creates: /etc/letsencrypt/live/{{ sprintforge_domain }}/fullchain.pem
+      when: sprintforge_tls
+    - name: Verify public TLS routing from the server
+      ansible.builtin.uri:
+        url: https://{{ sprintforge_domain }}/api/health
+        status_code: 200
+      when: sprintforge_tls
+  handlers:
+    - name: Restart SprintForge
+      ansible.builtin.systemd:
+        name: sprintforge
+        state: restarted
+        daemon_reload: true
+    - name: Reload Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded
