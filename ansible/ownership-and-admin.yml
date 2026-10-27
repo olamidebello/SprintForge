@@ -1,0 +1,44 @@
+---
+- import_playbook: rebuild-and-repair.yml
+- name: Apply SprintForge platform administrator and ownership updates
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read verified active release report
+      ansible.builtin.slurp:
+        src: /var/lib/sprintforge-hard-repair/report.json
+      register: sf_report_file
+    - name: Resolve verified release
+      ansible.builtin.set_fact:
+        sf_report: '{{ sf_report_file.content | b64decode | from_json }}'
+    - name: Require successful versioned release
+      ansible.builtin.assert:
+        that:
+          - sf_report.status == 'passed'
+          - sf_report.source is match('^/opt/sprintforge-releases/[A-Za-z0-9-]+$')
+    - name: Promote existing requested account without changing its password
+      become_user: sprintforge
+      ansible.builtin.command:
+        argv:
+          - python3
+          - '{{ sf_report.source }}/manage.py'
+          - create-superadmin
+          - dobcalldemo@gmail.com
+          - --existing-only
+      environment:
+        SPRINTFORGE_DB: /var/lib/sprintforge/sprintforge.db
+      register: sf_promotion
+      changed_when: "'Promoted to' in sf_promotion.stdout"
+    - name: Verify published ownership pages
+      ansible.builtin.uri:
+        url: 'https://sprintforge.netwizzard.tech/{{ item }}'
+        return_content: true
+        validate_certs: true
+        status_code: 200
+      loop: [terms, privacy, copyright]
+      register: sf_legal
+      failed_when: "'Olamide Olatayo Bello Corporation' not in sf_legal.content"
+    - name: Report verified result
+      ansible.builtin.debug:
+        msg: 'dobcalldemo@gmail.com has platform super admin access. Terms, privacy and copyright pages identify Olamide Olatayo Bello Corporation. Sign out and sign in again to refresh navigation.'

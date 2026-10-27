@@ -105,7 +105,7 @@ Move backups to protected off-server storage according to your retention policy.
 
 This is a working first release, not a claim of feature parity with every enterprise SDLC suite. Test runs record manual or external automated results; they do not execute test code. GitHub/CI synchronization, SSO/MFA, email delivery/invitations, self-service password recovery, attachment storage, billing, custom workflow builders, dependency/Gantt planning and native mobile packages are not implemented. Evidence is stored as HTTPS links. Roadmap dates are target fields, not a Gantt scheduler. No automatic production deployment is triggered by release status.
 
-Baseline terms/privacy information is included in the UI. The installation operator must supply its verified legal identity, contact and appropriate policies before a public commercial launch. No license granting third-party redistribution rights is included.
+Public terms, privacy and copyright pages identify Olamide Olatayo Bello Corporation as the operator and copyright owner, subject to user and third-party rights. The operator should keep these notices aligned with actual operations. No license granting third-party redistribution rights is included.
 
 ## Artwork
 
@@ -155,3 +155,7 @@ ansible-pull -U https://github.com/olamidebello/SprintForge.git -C main \
 ```
 
 This creates a separate fresh checkout under `/opt/sprintforge-releases`, restores service-readable permissions on tracked code/assets, checks Python compilation and the application test suite, verifies required assets, and activates the checked-out release through the dedicated SprintForge systemd override. It then performs backend-port selection, application identity checks, domain routing repair and public HTTPS verification. Existing databases remain at `/var/lib/sprintforge/sprintforge.db`; old source releases are retained. A failed rebuild does not delete old releases or application data. Nginx rollback remains limited to changed Nginx files; service activation is retained for diagnosis. External DNS/firewall failures are reported rather than silently bypassed. No JavaScript bundling step is needed: this application serves its tracked HTML, CSS and JavaScript directly.
+
+## Corporation ownership and requested administrator
+
+Run `ansible/ownership-and-admin.yml` with the same `ansible-pull` repository and inventory arguments to rebuild the active release, publish `/terms`, `/privacy` and `/copyright`, and promote the existing account `dobcalldemo@gmail.com` to platform super admin. This never changes an existing password or re-enables a disabled account. If the email does not yet have an account, register it on SprintForge and rerun the command. The update is not applied to a live server until that playbook runs successfully there.

@@ -347,7 +347,7 @@ class Handler(BaseHTTPRequestHandler):
         if ticket is None:
             require(not any(r['kind']=='ticket' and r.get('project')==project and r.get('type')=='Bug' and r['status']!='Done' for r in records),'Quality gate: close open defects before release',409)
     def static(self,path):
-        paths={'/':'index.html','/app':'index.html'}
+        paths={'/':'index.html','/app':'index.html','/terms':'terms.html','/privacy':'privacy.html','/copyright':'copyright.html'}
         rel=paths.get(path,path.removeprefix('/static/') if path.startswith('/static/') else '')
         file=(ROOT/'static'/rel).resolve()
         require(rel and file.is_relative_to((ROOT/'static').resolve()) and file.is_file(),'Not found',404)

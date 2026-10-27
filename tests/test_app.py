@@ -89,6 +89,24 @@ class AppTest(unittest.TestCase):
         self.assertEqual(self.b.request('comments','POST',{'record':ticket['id'],'body':'Intrusion'})[0],404)
         self.assertEqual(self.a.request('records/'+self.p['id'],'DELETE')[0],409)
         self.assertEqual(self.a.request('records/'+ticket['id'],'DELETE')[0],200)
+    def test_legal_pages_public_and_company_named(self):
+        for page in ('terms','privacy','copyright'):
+            with urllib.request.urlopen(self.a.url+'/'+page) as response:
+                self.assertEqual(response.status,200)
+                self.assertIn('Olamide Olatayo Bello Corporation',response.read().decode())
+    def test_existing_account_cli_promotion_is_idempotent(self):
+        import subprocess
+        env=dict(os.environ,SPRINTFORGE_DB=app.DB)
+        command=[sys.executable,str(Path(app.__file__).parent/'manage.py'),'create-superadmin','a@example.com','--existing-only']
+        one=subprocess.run(command,env=env,capture_output=True,text=True)
+        self.assertEqual(one.returncode,0,one.stderr)
+        two=subprocess.run(command,env=env,capture_output=True,text=True)
+        self.assertEqual(two.returncode,0,two.stderr)
+        self.assertIn('Already',two.stdout)
+        self.assertEqual(self.a.request('platform')[0],200)
+        with app.connect() as c:self.assertEqual(c.execute("SELECT count(*) FROM platform_audit WHERE action='CLI grant superadmin'").fetchone()[0],1)
+        missing=subprocess.run(command[:-2]+['missing@example.com','--existing-only'],env=env,capture_output=True,text=True)
+        self.assertNotEqual(missing.returncode,0)
     def test_password_session_revocation(self):
         other=Client(self.a.url);other.request('login','POST',{'email':'a@example.com','password':'a-strong-password-123'})
         self.assertEqual(other.request('me')[0],200)
