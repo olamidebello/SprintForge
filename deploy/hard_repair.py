@@ -38,7 +38,7 @@ def inject(source):
 
 class Repair:
     def __init__(self,email):
-        self.email=email; self.stage='initializing'; self.saved={};self.routing=False
+        self.email=email; self.port=18870; self.stage='initializing'; self.saved={};self.routing=False
         STATE.mkdir(mode=0o700,parents=True,exist_ok=True)
         stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+str(os.getpid())
         self.backup=STATE/stamp;self.backup.mkdir(mode=0o700)
@@ -86,11 +86,26 @@ class Repair:
                 value=f'[{ip}]' if ':' in ip else ip
                 out.append(f'    listen {value}:{port}'+(' ssl' if port==443 else '')+';')
             return '\n'.join(out)
-        proxy='''    add_header X-SprintForge-Route managed-v2 always;\n    location / {\n        proxy_pass http://127.0.0.1:18870;\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_read_timeout 30s;\n    }\n'''
+        proxy='''    add_header X-SprintForge-Route managed-v2 always;\n    location / {\n        proxy_pass http://127.0.0.1:SPRINTFORGE_BACKEND_PORT;\n        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_read_timeout 30s;\n    }\n'''
+        proxy=proxy.replace('SPRINTFORGE_BACKEND_PORT',str(getattr(self,'port',18870)))
         acme='    location ^~ /.well-known/acme-challenge/ { root /var/lib/sprintforge-acme; }\n'
         http='server {\n'+listens(80)+f'\n    server_name {DOMAIN};\n    client_max_body_size 100k;\n'+acme
         if not tls:return '# Managed by SprintForge hard repair\n'+http+proxy+'}\n'
         return '# Managed by SprintForge hard repair\n'+http+f'    location / {{ return 301 https://{DOMAIN}$request_uri; }}\n}}\nserver {{\n'+listens(443)+f'\n    server_name {DOMAIN};\n    ssl_certificate /etc/letsencrypt/live/{DOMAIN}/fullchain.pem;\n    ssl_certificate_key /etc/letsencrypt/live/{DOMAIN}/privkey.pem;\n    ssl_protocols TLSv1.2 TLSv1.3;\n    client_max_body_size 100k;\n'+proxy+'}\n'
+    def choose_port(self):
+        settings=Path('/etc/sprintforge/backend-port')
+        candidates=[]
+        if settings.exists():
+            try:candidates.append(int(settings.read_text().strip()))
+            except ValueError:pass
+        candidates+=list(range(18870,18971))
+        for port in dict.fromkeys(candidates):
+            if not 1024<=port<=65535:continue
+            with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as sock:
+                try:sock.bind(('127.0.0.1',port))
+                except OSError:continue
+                return port
+        raise RuntimeError('No available SprintForge backend port in 18870–18970')
     def repair(self):
         self.stage='packages and application'
         self.run(['apt-get','update']);self.run(['apt-get','install','-y','git','python3','nginx','curl','certbot','ca-certificates'])
@@ -109,10 +124,35 @@ class Repair:
         except RuntimeError:self.run(['useradd','--system','--no-create-home','--shell','/usr/sbin/nologin','sprintforge'])
         self.run(['install','-d','-m','0700','-o','sprintforge','-g','sprintforge','/var/lib/sprintforge'])
         self.write('/etc/systemd/system/sprintforge.service','''[Unit]\nDescription=SprintForge\nAfter=network.target\n[Service]\nUser=sprintforge\nGroup=sprintforge\nWorkingDirectory=/opt/sprintforge\nEnvironment=SPRINTFORGE_DB=/var/lib/sprintforge/sprintforge.db\nEnvironment=SPRINTFORGE_SECURE_COOKIE=1\nEnvironment=HOST=127.0.0.1\nEnvironment=PORT=18870\nExecStart=/usr/bin/python3 /opt/sprintforge/app.py\nRestart=on-failure\nRestartSec=3\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\nReadWritePaths=/var/lib/sprintforge\n[Install]\nWantedBy=multi-user.target\n''')
-        self.run(['systemctl','daemon-reload']);self.run(['systemctl','enable','--now','sprintforge']);self.run(['systemctl','restart','sprintforge'])
-        self.run(['curl','--fail','--silent','--show-error','--retry','5','--retry-connrefused','--retry-delay','1','http://127.0.0.1:18870/api/health'])
-        backend=self.run(['curl','--fail','--silent','--show-error','--noproxy','*','--max-time','10','http://127.0.0.1:18870/'])
-        if '<title>SprintForge' not in backend:raise RuntimeError('Port 18870 does not serve the SprintForge application')
+        # Stop only the SprintForge unit before selecting its backend port.
+        self.run(['systemctl','stop','sprintforge'])
+        self.port=self.choose_port()
+        Path('/etc/sprintforge').mkdir(mode=0o755,exist_ok=True)
+        self.write('/etc/sprintforge/backend-port',str(self.port)+'\n')
+        override=Path('/etc/systemd/system/sprintforge.service.d')
+        override.mkdir(parents=True,exist_ok=True)
+        self.write(override/'zzzz-sprintforge-repair.conf',f"""[Service]
+Type=simple
+User=sprintforge
+Group=sprintforge
+WorkingDirectory=/opt/sprintforge
+EnvironmentFile=
+ExecStart=
+ExecStart=/usr/bin/env HOST=127.0.0.1 PORT={self.port} SPRINTFORGE_DB=/var/lib/sprintforge/sprintforge.db SPRINTFORGE_SECURE_COOKIE=1 /usr/bin/python3 /opt/sprintforge/app.py
+Restart=on-failure
+RestartSec=3
+""")
+        self.run(['systemctl','daemon-reload'])
+        self.run(['systemctl','reset-failed','sprintforge'])
+        self.run(['systemctl','enable','--now','sprintforge'])
+        self.run(['systemctl','show','sprintforge','-p','MainPID','-p','ExecStart','-p','DropInPaths'])
+        backend_url='http://127.0.0.1:'+str(self.port)
+        root=self.run(['curl','--fail','--silent','--show-error','--noproxy','*','--max-time','10','--retry','8','--retry-connrefused','--retry-delay','1',backend_url+'/'])
+        if '<title>SprintForge' not in root:
+            title=re.search(r'<title[^>]*>(.*?)</title>',root,re.I|re.S)
+            raise RuntimeError('Backend '+str(self.port)+' returned '+repr(title.group(1)[:120] if title else 'no page title')+'; inspect private service diagnostics')
+        health=self.run(['curl','--fail','--silent','--show-error','--noproxy','*','--max-time','10',backend_url+'/api/health'])
+        if json.loads(health).get('status')!='ok':raise RuntimeError('SprintForge backend health check failed')
         self.stage='active Nginx routing'
         dump=self.run(['nginx','-T']);(self.backup/'nginx-before.txt').write_text(dump)
         files=re.findall(r'^# configuration file (.+):$',dump,re.M)
@@ -171,11 +211,13 @@ class Repair:
         try:self.repair();report.update(status='passed',stage='complete',url='https://'+DOMAIN);code=0
         except Exception as e:
             report.update(stage=self.stage,reason=str(e));code=1
-            try:self.run(['ss','-ltnp'])
-            except Exception:pass
+            for command in [['ss','-ltnp'],['systemctl','show','sprintforge','-p','MainPID','-p','ExecStart','-p','DropInPaths'],['journalctl','-u','sprintforge','-n','60','--no-pager']]:
+                try:self.run(command)
+                except Exception:pass
             if self.routing:
                 try:self.restore();report['routing_restored']=True
                 except Exception as rollback:report['routing_restore_error']=str(rollback)
+        report['backend_port']=self.port
         (STATE/'report.json').write_text(json.dumps(report,indent=2));print(json.dumps(report));return code
 
 if __name__=='__main__':

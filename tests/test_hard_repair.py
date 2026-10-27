@@ -44,6 +44,11 @@ class RepairTests(unittest.TestCase):
             with patch.object(r.time,'sleep'):
                 with self.assertRaisesRegex(RuntimeError,'Olamidepanel'):
                     repair.probe('127.0.0.1',80,attempts=2)
+    def test_selected_port_is_used_by_proxy(self):
+        repair=object.__new__(r.Repair);repair.port=18925
+        text=repair.config(['127.0.0.1'])
+        self.assertIn('proxy_pass http://127.0.0.1:18925;',text)
+        self.assertNotIn('18870',text)
     def test_renders_http_and_tls(self):
         repair=object.__new__(r.Repair)
         for tls in (False,True):
