@@ -110,3 +110,16 @@ Baseline terms/privacy information is included in the UI. The installation opera
 ## Artwork
 
 `static/brand-board.webp` preserves the original generated logo/artwork composition. `static/logo.webp` and `static/hero.webp` are cropped from that board and used throughout the account screens, navigation and dashboard. Admins can download each through **Administration → Brand assets**. These are raster assets; no vector master is claimed.
+
+## One-command server installation or update
+
+The bootstrap script installs Git and Ansible on Debian/Ubuntu, obtains a fresh copy of this repository and runs the deployment playbook locally. It serializes deployments with a lock and keeps the application database outside the source checkout. Existing databases are backed up consistently to `/var/backups/sprintforge` before source updates. Backups are retained until the operator rotates them.
+
+After pointing DNS at the target server, run there (replace the email):
+
+```sh
+curl -fsSLo /tmp/sprintforge-deploy.sh https://raw.githubusercontent.com/olamidebello/SprintForge/main/scripts/deploy.sh
+sudo bash /tmp/sprintforge-deploy.sh YOUR_CERTIFICATE_EMAIL
+```
+
+Repeat the same commands to pull and deploy subsequent updates. The script stops on errors; it does not force-overwrite dirty application checkouts. It checks the application, Nginx routing, and public HTTPS. Existing deployments get a pre-update backup, but this is not an automatic rollback mechanism. If a deployment fails, use the reported task and service logs to diagnose it before retrying.

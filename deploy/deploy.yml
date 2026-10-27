@@ -34,6 +34,27 @@
         owner: root
         group: root
         mode: '0755'
+    - name: Detect existing application database
+      ansible.builtin.stat:
+        path: /var/lib/sprintforge/sprintforge.db
+      register: sf_existing_database
+    - name: Create protected backup directory
+      ansible.builtin.file:
+        path: /var/backups/sprintforge
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      when: sf_existing_database.stat.exists
+    - name: Back up existing database before updating source
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - "import os,sqlite3,sys; os.umask(0o077); src=sqlite3.connect('file:/var/lib/sprintforge/sprintforge.db?mode=ro',uri=True); dest=sqlite3.connect(sys.argv[1]); src.backup(dest); dest.close(); src.close()"
+          - '/var/backups/sprintforge/pre-deploy-{{ ansible_date_time.iso8601_basic_short }}-{{ ansible_date_time.epoch }}.db'
+      when: sf_existing_database.stat.exists
+      changed_when: true
     - name: Pull application source
       ansible.builtin.git:
         repo: '{{ sprintforge_repo }}'
@@ -121,6 +142,16 @@
       retries: 5
       delay: 2
       until: sf_health.status == 200
+    - name: Verify local domain routing through Nginx
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        headers:
+          Host: '{{ sprintforge_domain }}'
+        follow_redirects: none
+        status_code: [200, 301, 302, 308]
+        return_content: true
+      register: sf_routing
+      failed_when: sf_routing.status == 200 and 'SprintForge' not in sf_routing.content
     - name: Provision TLS certificate and redirect HTTP
       ansible.builtin.command:
         argv:
