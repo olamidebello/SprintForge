@@ -145,3 +145,13 @@ Before writes, original configuration is saved privately under `/var/lib/sprintf
 ### Automatic backend-port conflict repair
 
 The hard-repair playbook now stops only the SprintForge unit, selects a free loopback port (18870–18970, preferring its persisted selection), writes `/etc/sprintforge/backend-port`, and applies a dedicated systemd override with an explicit application command and environment. It verifies the actual backend page and JSON health before pointing Nginx at that port. It does not kill processes occupying other ports. Original changed configuration is backed up; service and socket diagnostics remain in the private repair log if checks fail. Nginx rollback restores the prior configuration only; backend/service changes are retained. Use `ansible/hard-repair.yml` for subsequent updates because the original generic deployment assumes port 18870.
+
+## Rebuild and repair from a fresh release
+
+```sh
+ansible-pull -U https://github.com/olamidebello/SprintForge.git -C main \
+  -d /opt/sprintforge-hard-repair-source -i localhost, -c local \
+  ansible/rebuild-and-repair.yml -e sprintforge_email=dobcalldemo@gmail.com
+```
+
+This creates a separate fresh checkout under `/opt/sprintforge-releases`, restores service-readable permissions on tracked code/assets, checks Python compilation and the application test suite, verifies required assets, and activates the checked-out release through the dedicated SprintForge systemd override. It then performs backend-port selection, application identity checks, domain routing repair and public HTTPS verification. Existing databases remain at `/var/lib/sprintforge/sprintforge.db`; old source releases are retained. A failed rebuild does not delete old releases or application data. Nginx rollback remains limited to changed Nginx files; service activation is retained for diagnosis. External DNS/firewall failures are reported rather than silently bypassed. No JavaScript bundling step is needed: this application serves its tracked HTML, CSS and JavaScript directly.

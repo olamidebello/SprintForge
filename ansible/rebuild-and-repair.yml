@@ -1,0 +1,28 @@
+---
+- name: Rebuild SprintForge from fresh source and repair its deployment
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    sprintforge_email: dobcalldemo@gmail.com
+  tasks:
+    - name: Rebuild and verify release then repair service routing and HTTPS
+      ansible.builtin.command:
+        argv:
+          - python3
+          - '{{ playbook_dir }}/../deploy/hard_repair.py'
+          - --email
+          - '{{ sprintforge_email }}'
+          - --rebuild
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: sprintforge_rebuild
+      changed_when: true
+      failed_when: false
+    - name: Show rebuild report
+      ansible.builtin.debug:
+        msg: '{{ sprintforge_rebuild.stdout | default("") }}'
+    - name: Require verified public SprintForge deployment
+      ansible.builtin.assert:
+        that: sprintforge_rebuild.rc == 0
+        fail_msg: 'Rebuild/repair incomplete. Read /var/lib/sprintforge-hard-repair/report.json for the exact stage and private diagnostic location.'

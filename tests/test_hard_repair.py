@@ -44,6 +44,18 @@ class RepairTests(unittest.TestCase):
             with patch.object(r.time,'sleep'):
                 with self.assertRaisesRegex(RuntimeError,'Olamidepanel'):
                     repair.probe('127.0.0.1',80,attempts=2)
+    def test_private_checkout_becomes_service_readable(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            subprocess.run(['git','init','-q',directory],check=True)
+            asset=root/'static'/'index.html';asset.parent.mkdir(mode=0o700)
+            asset.write_text('<title>SprintForge</title>');asset.chmod(0o600)
+            subprocess.run(['git','-C',directory,'add','static/index.html'],check=True)
+            r.Repair.source_permissions(root)
+            self.assertEqual(asset.stat().st_mode & 0o777,0o644)
+            self.assertEqual(asset.parent.stat().st_mode & 0o777,0o755)
+            self.assertEqual(root.stat().st_mode & 0o777,0o755)
     def test_selected_port_is_used_by_proxy(self):
         repair=object.__new__(r.Repair);repair.port=18925
         text=repair.config(['127.0.0.1'])

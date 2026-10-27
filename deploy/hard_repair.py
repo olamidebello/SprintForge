@@ -37,8 +37,8 @@ def inject(source):
     raise RuntimeError('No http block in /etc/nginx/nginx.conf')
 
 class Repair:
-    def __init__(self,email):
-        self.email=email; self.port=18870; self.stage='initializing'; self.saved={};self.routing=False
+    def __init__(self,email,rebuild=False):
+        self.email=email; self.rebuild=rebuild; self.port=18870; self.stage='initializing'; self.saved={};self.routing=False
         STATE.mkdir(mode=0o700,parents=True,exist_ok=True)
         stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+str(os.getpid())
         self.backup=STATE/stamp;self.backup.mkdir(mode=0o700)
@@ -92,6 +92,18 @@ class Repair:
         http='server {\n'+listens(80)+f'\n    server_name {DOMAIN};\n    client_max_body_size 100k;\n'+acme
         if not tls:return '# Managed by SprintForge hard repair\n'+http+proxy+'}\n'
         return '# Managed by SprintForge hard repair\n'+http+f'    location / {{ return 301 https://{DOMAIN}$request_uri; }}\n}}\nserver {{\n'+listens(443)+f'\n    server_name {DOMAIN};\n    ssl_certificate /etc/letsencrypt/live/{DOMAIN}/fullchain.pem;\n    ssl_certificate_key /etc/letsencrypt/live/{DOMAIN}/privkey.pem;\n    ssl_protocols TLSv1.2 TLSv1.3;\n    client_max_body_size 100k;\n'+proxy+'}\n'
+    @staticmethod
+    def source_permissions(source):
+        source.chmod(0o755)
+        tracked=subprocess.check_output(['git','-C',str(source),'ls-files','-z']).decode().split('\0')
+        for name in filter(None,tracked):
+            p=source/name
+            if p.is_symlink():raise RuntimeError('Unexpected symlink in release: '+name)
+            if not p.is_file():continue
+            p.chmod(0o644)
+            for parent in p.parents:
+                if parent==source:break
+                parent.chmod(0o755)
     def choose_port(self):
         settings=Path('/etc/sprintforge/backend-port')
         candidates=[]
@@ -111,11 +123,26 @@ class Repair:
         self.run(['apt-get','update']);self.run(['apt-get','install','-y','git','python3','nginx','curl','certbot','ca-certificates'])
         self.run(['nginx','-t'])
         source=Path('/opt/sprintforge')
-        if (source/'.git').exists():
-            if self.run(['git','-C',str(source),'status','--porcelain']).strip():raise RuntimeError('Application checkout has local changes; retained without overwriting')
+        if self.rebuild:
+            self.stage='fresh source checkout and verification'
+            releases=Path('/opt/sprintforge-releases');releases.mkdir(mode=0o755,exist_ok=True);releases.chmod(0o755)
+            source=releases/self.backup.name
+            self.run(['git','clone','--depth','1','--branch','main','https://github.com/olamidebello/SprintForge.git',str(source)])
+        elif (source/'.git').exists():
+            if self.run(['git','-C',str(source),'status','--porcelain']).strip():raise RuntimeError('Application checkout has local changes; use rebuild-and-repair.yml to deploy a separate fresh release')
             self.run(['git','-C',str(source),'pull','--ff-only','origin','main'])
-        elif source.exists() and any(source.iterdir()):raise RuntimeError('Non-Git application directory is not empty')
+        elif source.exists() and any(source.iterdir()):raise RuntimeError('Non-Git application directory is not empty; use rebuild-and-repair.yml')
         else:self.run(['git','clone','https://github.com/olamidebello/SprintForge.git',str(source)])
+        self.source=source
+        # The repair's private umask must not make application code unreadable by its service user.
+        self.source_permissions(source)
+        self.run(['python3','-m','py_compile',str(source/'app.py'),str(source/'manage.py')])
+        if self.rebuild:
+            self.run(['python3','-m','unittest','discover','-s',str(source/'tests'),'-q'])
+        required=['app.py','manage.py','static/index.html','static/app.js','static/style.css','static/logo.webp','static/hero.webp']
+        for relative in required:
+            if not (source/relative).is_file() or not (source/relative).stat().st_size:raise RuntimeError('Missing release asset: '+relative)
+        if '<title>SprintForge' not in (source/'static/index.html').read_text():raise RuntimeError('Release is missing the SprintForge identity')
         db=Path('/var/lib/sprintforge/sprintforge.db')
         if db.exists():
             import sqlite3
@@ -135,10 +162,10 @@ class Repair:
 Type=simple
 User=sprintforge
 Group=sprintforge
-WorkingDirectory=/opt/sprintforge
+WorkingDirectory={source}
 EnvironmentFile=
 ExecStart=
-ExecStart=/usr/bin/env HOST=127.0.0.1 PORT={self.port} SPRINTFORGE_DB=/var/lib/sprintforge/sprintforge.db SPRINTFORGE_SECURE_COOKIE=1 /usr/bin/python3 /opt/sprintforge/app.py
+ExecStart=/usr/bin/env HOST=127.0.0.1 PORT={self.port} SPRINTFORGE_DB=/var/lib/sprintforge/sprintforge.db SPRINTFORGE_SECURE_COOKIE=1 /usr/bin/python3 {source}/app.py
 Restart=on-failure
 RestartSec=3
 """)
@@ -218,10 +245,11 @@ RestartSec=3
                 try:self.restore();report['routing_restored']=True
                 except Exception as rollback:report['routing_restore_error']=str(rollback)
         report['backend_port']=self.port
+        report['source']=str(getattr(self,'source',''))
         (STATE/'report.json').write_text(json.dumps(report,indent=2));print(json.dumps(report));return code
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--email',required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--email',required=True);p.add_argument('--rebuild',action='store_true');a=p.parse_args()
     if os.geteuid()!=0:p.error('Run as root')
     if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',a.email):p.error('Invalid certificate email')
     os.umask(0o077)
@@ -229,4 +257,4 @@ if __name__=='__main__':
     with open('/run/lock/sprintforge-deploy.lock','w') as lock:
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:sys.exit('Another SprintForge deployment is running')
-        sys.exit(Repair(a.email).execute())
+        sys.exit(Repair(a.email,a.rebuild).execute())
