@@ -159,3 +159,19 @@ This creates a separate fresh checkout under `/opt/sprintforge-releases`, restor
 ## Corporation ownership and requested administrator
 
 Run `ansible/ownership-and-admin.yml` with the same `ansible-pull` repository and inventory arguments to rebuild the active release, publish `/terms`, `/privacy` and `/copyright`, and promote the existing account `dobcalldemo@gmail.com` to platform super admin. This never changes an existing password or re-enables a disabled account. If the email does not yet have an account, register it on SprintForge and rerun the command. The update is not applied to a live server until that playbook runs successfully there.
+
+## Mobile installation and African Apps Store
+
+`/install` provides an Android development-preview APK link, browser PWA installation and Safari Add to Home Screen instructions. The web app uses a manifest and a service worker caching only its generic offline page and public icons; authenticated navigation, API responses and project data are never put into this cache. Internet is required for workspace use. The Android client targets Android 8+ and allows only the SprintForge HTTPS origin inside its WebView, with other supported links opening externally. It does not add a JavaScript bridge, native push, background jobs or offline editing. Use Browser for unsupported flows.
+
+The `.github/workflows/android-preview.yml` workflow compiles and signs a development preview, verifies its Android signature and package metadata, and publishes the APK, SHA-256 file and release metadata to the `android-preview` GitHub prerelease. Signing is development-only and ephemeral per build: upgrades may require uninstalling the old preview first. This is not a Play Store production signing arrangement. No native iOS app is supplied.
+
+To deploy the install links and update the existing store on the same server:
+
+```sh
+ansible-pull -U https://github.com/olamidebello/SprintForge.git -C main \
+  -d /opt/sprintforge-hard-repair-source -i localhost, -c local \
+  ansible/mobile-and-store.yml -e sprintforge_email=dobcalldemo@gmail.com
+```
+
+The store publisher discovers `africanappsstore.service` and its existing database, backs up that database, updates only SprintForge’s hosted listing, preserves existing visibility choices, and adds a device-install link to the current store UI when its known anchor is present. It verifies the released APK against its published size and checksum before offering that download. If the release does not exist, only the install page is listed. It does not create/reset store accounts or change store routing. It requires that the existing store run on this same target server; otherwise run its publisher on the actual store host. Source changes must be deployed on the host before public links appear.

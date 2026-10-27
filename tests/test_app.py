@@ -107,6 +107,15 @@ class AppTest(unittest.TestCase):
         with app.connect() as c:self.assertEqual(c.execute("SELECT count(*) FROM platform_audit WHERE action='CLI grant superadmin'").fetchone()[0],1)
         missing=subprocess.run(command[:-2]+['missing@example.com','--existing-only'],env=env,capture_output=True,text=True)
         self.assertNotEqual(missing.returncode,0)
+    def test_mobile_install_routes(self):
+        for path,kind,marker in [('install','text/html','Download Android preview APK'),('manifest.webmanifest','application/manifest+json','SprintForge'),('sw.js','javascript','sprintforge-public-v1')]:
+            with urllib.request.urlopen(self.a.url+'/'+path) as response:
+                self.assertIn(kind,response.headers['Content-Type'])
+                self.assertIn(marker,response.read().decode())
+        with urllib.request.urlopen(self.a.url+'/sw.js') as response:
+            script=response.read().decode()
+            self.assertNotIn('cache.put',script)
+            self.assertIn("'/static/offline.html'",script)
     def test_password_session_revocation(self):
         other=Client(self.a.url);other.request('login','POST',{'email':'a@example.com','password':'a-strong-password-123'})
         self.assertEqual(other.request('me')[0],200)
