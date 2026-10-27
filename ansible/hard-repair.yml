@@ -1,0 +1,27 @@
+---
+- name: One-shot SprintForge application, domain routing and HTTPS repair
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    sprintforge_email: dobcalldemo@gmail.com
+  tasks:
+    - name: Run one locked repair with private backups and diagnostics
+      ansible.builtin.command:
+        argv:
+          - python3
+          - '{{ playbook_dir }}/../deploy/hard_repair.py'
+          - --email
+          - '{{ sprintforge_email }}'
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: sprintforge_repair
+      changed_when: true
+      failed_when: false
+    - name: Show repair outcome
+      ansible.builtin.debug:
+        msg: '{{ sprintforge_repair.stdout | default("") }}'
+    - name: Require successful public SprintForge identity and HTTPS checks
+      ansible.builtin.assert:
+        that: sprintforge_repair.rc == 0
+        fail_msg: 'Repair incomplete. Inspect /var/lib/sprintforge-hard-repair/report.json and the private repair.log indicated there. Share the report first; review logs for secrets before sharing them.'

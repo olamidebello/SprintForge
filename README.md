@@ -127,3 +127,17 @@ Repeat the same commands to pull and deploy subsequent updates. The script stops
 ### Repair: domain serves Postmaster or another application
 
 Update and rerun `scripts/deploy.sh` using the command above. The playbook now explicitly binds SprintForge on loopback and the primary server IPv4 address, because an IP-specific Nginx listener can take precedence over a wildcard listener before hostname selection. This addresses that routing scenario without changing Postmaster's virtual host. It also rejects duplicate exact SprintForge names, verifies the enabled route is actually loaded, checks application identity on both local addresses and checks public routing before certificate issuance. A missing Nginx include or conflicting exact hostname stops deployment and saves private diagnostics at `/var/log/sprintforge-nginx-diagnostic.log`; it does not automatically rewrite unrelated configuration. Confirm or correct DNS if the public routing check still fails.
+
+## One-shot Olamidepanel domain repair
+
+If the SprintForge domain shows Olamidepanel, Postmaster or another site, run this on the target server:
+
+```sh
+ansible-pull -U https://github.com/olamidebello/SprintForge.git -C main \
+  -d /opt/sprintforge-hard-repair-source -i localhost, -c local \
+  ansible/hard-repair.yml -e sprintforge_email=dobcalldemo@gmail.com
+```
+
+This runs one locked repair, updates a clean application checkout, backs up an existing database, refreshes the dedicated systemd service, inspects active Nginx configuration, removes only the exact SprintForge hostname from conflicting server-name directives, and installs one explicitly included managed route for the server's configured IPv4 and global IPv6 addresses. Other hostnames and server blocks remain in place. Configurations containing only SprintForge receive an inert `.invalid` name so their unrelated directives are retained. It verifies local and public identity, tests HTTP ACME challenge routing, obtains or reuses a valid certificate, verifies HTTPS identity and health, and enables renewal with reload. No default administrator password is installed.
+
+Before writes, original configuration is saved privately under `/var/lib/sprintforge-hard-repair/TIMESTAMP-PID/`. If routing/TLS/public checks fail, only changed Nginx files are restored; application source, installed packages, service changes, data and certificates are retained. This is not a full host rollback. Reports are written to `/var/lib/sprintforge-hard-repair/report.json`. Review private logs before sharing them. The repair cannot fix DNS held at your registrar, firewall/provider restrictions, missing DNS ownership, or unrelated invalid Nginx configurations: those failures stop and report the stage instead of claiming success. Do not run the original generic deployment playbook after this repair; use this same repair entry point for future updates so the managed route remains consistent.
